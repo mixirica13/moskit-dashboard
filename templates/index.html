@@ -264,26 +264,11 @@
                 </div>
             </div>
 
-            <h2 style="margin-top:16px;">Filtro por Campo Personalizado (opcional)</h2>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Campo</label>
-                    <select id="campoExtra">
-                        <option value="">-- Nenhum --</option>
-                    </select>
-                </div>
-                <div class="form-group" style="min-width:140px; flex:0.5;">
-                    <label>Tipo de busca</label>
-                    <select id="tipoBusca">
-                        <option value="match">Igual a (exato)</option>
-                        <option value="contains">Contém</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Valor</label>
-                    <input type="text" id="valorExtra" placeholder="Ex: nome da campanha">
-                </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:16px;">
+                <h2 style="margin:0; border-bottom:2px solid #e8f4f8; padding-bottom:8px; flex:1;">Filtro por Campo Personalizado (opcional)</h2>
+                <button type="button" class="btn btn-primary" style="padding:6px 14px; font-size:18px; line-height:1; border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center;" onclick="adicionarFiltroExtra()" title="Adicionar filtro">+</button>
             </div>
+            <div id="filtrosExtraContainer"></div>
 
             <div class="btn-row">
                 <button class="btn btn-primary" id="btnBuscar" onclick="buscarDeals()">
@@ -298,25 +283,26 @@
 
         <!-- Card de Análise -->
         <div class="card" id="analiseCard" style="display:none;">
-            <h2>Análise por Anúncio (ad_name)</h2>
-            <div class="form-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <h2 style="margin:0; border-bottom:2px solid #e8f4f8; padding-bottom:8px; flex:1;">Análise de Qualificação por Campos</h2>
+                <button type="button" class="btn btn-primary" style="padding:6px 14px; font-size:18px; line-height:1; border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center;" onclick="adicionarCampoAnalise()" title="Adicionar campo de agrupamento">+</button>
+            </div>
+            <div class="form-row" style="margin-top:12px;">
                 <div class="form-group">
                     <label>Etapa de referência</label>
                     <select id="etapaAnalise">
                         <option value="">-- Selecione após buscar --</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label>Campo de anúncio</label>
-                    <select id="campoAnuncio">
-                        <option value="">-- Selecione --</option>
-                    </select>
-                </div>
-                <div class="form-group" style="flex:0; align-self:flex-end;">
-                    <button class="btn btn-primary" onclick="analisarLeads()">Analisar</button>
-                </div>
+            </div>
+            <div id="camposAnaliseContainer"></div>
+            <div style="margin-top:12px;">
+                <button class="btn btn-primary" onclick="analisarLeads()">Analisar</button>
             </div>
             <div id="analiseResultado" style="margin-top:16px;"></div>
+            <div id="btnExportarAnaliseContainer" style="display:none; margin-top:12px;">
+                <button class="btn btn-success" onclick="exportarAnalise()">Exportar Análise (Excel)</button>
+            </div>
         </div>
 
         <div class="card" id="resultadosCard" style="display:none;">
@@ -333,6 +319,7 @@
         let dadosDeals = [];
         let dadosStageNames = [];
         let dadosCfNames = [];
+        let ultimaAnalise = null; // guarda resultado da última análise
 
         // Definir datas padrão (mês atual)
         const hoje = new Date();
@@ -387,16 +374,8 @@
                     select.appendChild(opt);
                 });
 
-                // Popular dropdown de campos extras (todos os campos)
-                const selectExtra = document.getElementById('campoExtra');
-                selectExtra.innerHTML = '<option value="">-- Nenhum --</option>';
-                data.forEach(c => {
-                    const opt = document.createElement('option');
-                    opt.value = c.key || c.field || c.id;
-                    opt.textContent = c.name || c.label || c.key || c.id;
-                    if (c.type) opt.textContent += ` (${c.type})`;
-                    selectExtra.appendChild(opt);
-                });
+                // Armazenar campos disponíveis para os filtros extras
+                camposDisponiveis = data;
 
                 setStatusConexao(`Conectado! ${data.length} campos encontrados (${camposParaExibir.length} de data).`, 'success');
                 document.getElementById('filtrosCard').style.display = 'block';
@@ -405,15 +384,75 @@
             }
         }
 
+        let filtroExtraCount = 0;
+        let camposDisponiveis = []; // armazena campos carregados da API
+
+        function adicionarFiltroExtra() {
+            filtroExtraCount++;
+            const id = filtroExtraCount;
+            const container = document.getElementById('filtrosExtraContainer');
+            const div = document.createElement('div');
+            div.className = 'form-row filtro-extra-row';
+            div.id = `filtroExtra_${id}`;
+            div.style.alignItems = 'flex-end';
+
+            let opcoesHTML = '<option value="">-- Nenhum --</option>';
+            camposDisponiveis.forEach(c => {
+                const val = c.key || c.field || c.id;
+                let texto = c.name || c.label || c.key || c.id;
+                if (c.type) texto += ` (${c.type})`;
+                opcoesHTML += `<option value="${val}">${texto}</option>`;
+            });
+
+            div.innerHTML = `
+                <div class="form-group">
+                    <label>Campo</label>
+                    <select class="campoExtra">${opcoesHTML}</select>
+                </div>
+                <div class="form-group" style="min-width:140px; flex:0.5;">
+                    <label>Tipo de busca</label>
+                    <select class="tipoBusca">
+                        <option value="match">Igual a (exato)</option>
+                        <option value="contains">Contém</option>
+                        <option value="not_contains">Não contém</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Valor</label>
+                    <input type="text" class="valorExtra" placeholder="Ex: nome da campanha">
+                </div>
+                <div class="form-group" style="flex:0; min-width:auto;">
+                    <button type="button" class="btn" style="background:#e74c3c; color:#fff; padding:10px 14px; font-size:16px; line-height:1;" onclick="removerFiltroExtra(${id})" title="Remover filtro">&times;</button>
+                </div>
+            `;
+            container.appendChild(div);
+        }
+
+        function removerFiltroExtra(id) {
+            const el = document.getElementById(`filtroExtra_${id}`);
+            if (el) el.remove();
+        }
+
+        function getFiltrosExtras() {
+            const filtros = [];
+            document.querySelectorAll('.filtro-extra-row').forEach(row => {
+                const campo = row.querySelector('.campoExtra').value;
+                const tipo = row.querySelector('.tipoBusca').value;
+                const valor = row.querySelector('.valorExtra').value.trim();
+                if (campo && valor) {
+                    filtros.push({ campo_extra: campo, tipo_busca: tipo, valor_extra: valor });
+                }
+            });
+            return filtros;
+        }
+
         function getParams() {
             return {
                 api_key: document.getElementById('apiKey').value.trim(),
                 data_inicio: document.getElementById('dataInicio').value,
                 data_fim: document.getElementById('dataFim').value,
                 campo_filtro: document.getElementById('campoFiltro').value,
-                campo_extra: document.getElementById('campoExtra').value,
-                tipo_busca: document.getElementById('tipoBusca').value,
-                valor_extra: document.getElementById('valorExtra').value.trim(),
+                filtros_extras: getFiltrosExtras(),
             };
         }
 
@@ -476,21 +515,17 @@
                     selEtapa.appendChild(opt);
                 });
 
-                // Popular dropdown de campo de anúncio (custom fields)
-                const selAnuncio = document.getElementById('campoAnuncio');
-                selAnuncio.innerHTML = '<option value="">-- Selecione --</option>';
-                // Coletar nomes de CF presentes nos deals
-                const cfPresentes = new Set();
+                // Coletar nomes de CF presentes nos deals para análise
+                cfPresentes = new Set();
                 dadosDeals.forEach(d => {
                     if (d.customFields) Object.keys(d.customFields).forEach(k => cfPresentes.add(k));
                 });
-                Array.from(cfPresentes).sort().forEach(cf => {
-                    const opt = document.createElement('option');
-                    opt.value = cf;
-                    opt.textContent = cf;
-                    if (cf.toLowerCase().includes('ad_name') || cf.toLowerCase().includes('adname')) opt.selected = true;
-                    selAnuncio.appendChild(opt);
-                });
+                cfPresentesList = Array.from(cfPresentes).sort();
+
+                // Limpar campos de análise anteriores e adicionar o primeiro
+                document.getElementById('camposAnaliseContainer').innerHTML = '';
+                campoAnaliseCount = 0;
+                adicionarCampoAnalise();
 
                 document.getElementById('analiseCard').style.display = 'block';
             } catch (e) {
@@ -558,13 +593,69 @@
             document.getElementById('tabelaContainer').innerHTML = html;
         }
 
+        // Variáveis para campos de análise dinâmicos
+        let campoAnaliseCount = 0;
+        let cfPresentes = new Set();
+        let cfPresentesList = [];
+
+        function adicionarCampoAnalise() {
+            campoAnaliseCount++;
+            const id = campoAnaliseCount;
+            const container = document.getElementById('camposAnaliseContainer');
+            const div = document.createElement('div');
+            div.className = 'form-row campo-analise-row';
+            div.id = `campoAnalise_${id}`;
+            div.style.alignItems = 'flex-end';
+
+            let opcoesHTML = '<option value="">-- Selecione --</option>';
+            cfPresentesList.forEach(cf => {
+                opcoesHTML += `<option value="${cf}">${cf}</option>`;
+            });
+
+            const nivelLabel = container.children.length === 0 ? 'Campo principal' :
+                               container.children.length === 1 ? 'Subcampo (nível 2)' :
+                               `Subcampo (nível ${container.children.length + 1})`;
+
+            div.innerHTML = `
+                <div class="form-group">
+                    <label>${nivelLabel}</label>
+                    <select class="campoAnaliseSel">${opcoesHTML}</select>
+                </div>
+                <div class="form-group" style="flex:0; min-width:auto;">
+                    <button type="button" class="btn" style="background:#e74c3c; color:#fff; padding:10px 14px; font-size:16px; line-height:1;" onclick="removerCampoAnalise(${id})" title="Remover campo">&times;</button>
+                </div>
+            `;
+            container.appendChild(div);
+        }
+
+        function removerCampoAnalise(id) {
+            const el = document.getElementById(`campoAnalise_${id}`);
+            if (el) el.remove();
+            // Renumerar labels
+            const rows = document.querySelectorAll('.campo-analise-row');
+            rows.forEach((row, idx) => {
+                const label = row.querySelector('label');
+                if (idx === 0) label.textContent = 'Campo principal';
+                else if (idx === 1) label.textContent = 'Subcampo (nível 2)';
+                else label.textContent = `Subcampo (nível ${idx + 1})`;
+            });
+        }
+
+        function getCamposAnalise() {
+            const campos = [];
+            document.querySelectorAll('.campo-analise-row .campoAnaliseSel').forEach(sel => {
+                if (sel.value) campos.push(sel.value);
+            });
+            return campos;
+        }
+
         function analisarLeads() {
             const etapaSelecionada = document.getElementById('etapaAnalise').value;
-            const campoAnuncio = document.getElementById('campoAnuncio').value;
+            const camposAgrupamento = getCamposAnalise();
 
-            if (!campoAnuncio) {
+            if (camposAgrupamento.length === 0) {
                 document.getElementById('analiseResultado').innerHTML =
-                    '<div class="status error" style="display:block;">Selecione o campo de anúncio.</div>';
+                    '<div class="status error" style="display:block;">Adicione e selecione pelo menos um campo de agrupamento.</div>';
                 return;
             }
 
@@ -574,48 +665,41 @@
                 return;
             }
 
-            // Ordem do funil (index menor = mais cedo no funil) - Pipeline 95636
+            // Ordem do funil
             const ordemFunil = [
-                'Inbound',                              // 482559
-                'Novo Lead',                            // 462709
-                'Agendado-IA',                          // 486873
-                'Desqualificado - IA',                  // 486875
-                'Pré-Qualificação (Abertura)',           // 457521
-                'Sem Contato',                          // 457523
-                'Em Contato',                           // 475012
-                'Qualificação',                         // 457522
-                'Webinário',                            // 457659
-                'StandBy',                              // 475013
-                'Conferência Agendada (Negociação)',     // 457658
-                'Conferência Realizada (Fechamento)',    // 457660
+                'Inbound', 'Novo Lead', 'Agendado-IA', 'Desqualificado - IA',
+                'Pré-Qualificação (Abertura)', 'Sem Contato', 'Em Contato',
+                'Qualificação', 'Webinário', 'StandBy',
+                'Conferência Agendada (Negociação)', 'Conferência Realizada (Fechamento)',
             ];
 
-            // Verifica se o lead PASSOU pela etapa (está nela ou em uma posterior)
             function passouPelaEtapa(stageName, etapa) {
                 const idxEtapa = ordemFunil.indexOf(etapa);
                 const idxLead = ordemFunil.indexOf(stageName);
                 if (idxEtapa === -1) return stageName === etapa;
-                if (idxLead === -1) return false; // etapa desconhecida
+                if (idxLead === -1) return false;
                 return idxLead >= idxEtapa;
             }
 
-            // Agrupar por ad_name
-            const porAnuncio = {};
+            // Agrupar por combinação dos campos selecionados
+            const agrupado = {};
             for (const d of dadosDeals) {
-                const adName = (d.customFields && d.customFields[campoAnuncio]) || '(vazio)';
-                if (!porAnuncio[adName]) {
-                    porAnuncio[adName] = { total: 0, naEtapa: 0 };
+                const chaves = camposAgrupamento.map(c =>
+                    (d.customFields && d.customFields[c]) || '(vazio)'
+                );
+                const chaveComposta = chaves.join(' ▸ ');
+
+                if (!agrupado[chaveComposta]) {
+                    agrupado[chaveComposta] = { total: 0, naEtapa: 0, valores: chaves };
                 }
-                porAnuncio[adName].total++;
-                if (etapaSelecionada) {
-                    if (passouPelaEtapa(d.stage_name, etapaSelecionada)) {
-                        porAnuncio[adName].naEtapa++;
-                    }
+                agrupado[chaveComposta].total++;
+                if (etapaSelecionada && passouPelaEtapa(d.stage_name, etapaSelecionada)) {
+                    agrupado[chaveComposta].naEtapa++;
                 }
             }
 
             // Ordenar por total desc
-            const anuncios = Object.entries(porAnuncio)
+            const linhas = Object.entries(agrupado)
                 .sort((a, b) => b[1].total - a[1].total);
 
             const totalGeral = dadosDeals.length;
@@ -624,6 +708,7 @@
                 : totalGeral;
             const pctGeralEtapa = totalGeral > 0 ? ((totalNaEtapa / totalGeral) * 100).toFixed(1) : '0.0';
 
+            // Resumo
             let html = `<div class="resumo-box">
                 <div class="resumo-item">
                     <div class="valor">${totalGeral}</div>
@@ -642,15 +727,16 @@
             }
 
             html += `<div class="resumo-item">
-                <div class="valor">${anuncios.length}</div>
-                <div class="label">Anúncios distintos</div>
+                <div class="valor">${linhas.length}</div>
+                <div class="label">Combinações distintas</div>
             </div></div>`;
 
-            html += `<table class="analise-table">
-                <thead><tr>
-                    <th>Anúncio (${campoAnuncio})</th>
-                    <th>Total Leads</th>`;
-
+            // Tabela
+            html += `<table class="analise-table"><thead><tr>`;
+            for (const campo of camposAgrupamento) {
+                html += `<th>${campo}</th>`;
+            }
+            html += `<th>Total Leads</th>`;
             if (etapaSelecionada) {
                 html += `<th>Passaram por "${etapaSelecionada}"</th>
                     <th>% Conversão</th>
@@ -658,14 +744,16 @@
             }
             html += `</tr></thead><tbody>`;
 
-            for (const [nome, dados] of anuncios) {
+            for (const [chave, dados] of linhas) {
                 const pct = dados.total > 0 ? ((dados.naEtapa / dados.total) * 100).toFixed(1) : '0.0';
                 const barColor = parseFloat(pct) >= 50 ? '#27ae60' :
                                  parseFloat(pct) >= 25 ? '#f39c12' : '#e74c3c';
 
-                html += `<tr>
-                    <td style="max-width:400px;word-break:break-all;">${nome}</td>
-                    <td><strong>${dados.total}</strong></td>`;
+                html += `<tr>`;
+                for (const val of dados.valores) {
+                    html += `<td style="max-width:300px;word-break:break-all;">${val}</td>`;
+                }
+                html += `<td><strong>${dados.total}</strong></td>`;
 
                 if (etapaSelecionada) {
                     html += `<td>${dados.naEtapa}</td>
@@ -681,6 +769,48 @@
 
             html += '</tbody></table>';
             document.getElementById('analiseResultado').innerHTML = html;
+
+            // Salvar dados para exportação
+            ultimaAnalise = {
+                camposAgrupamento,
+                etapaSelecionada,
+                totalGeral,
+                totalNaEtapa,
+                pctGeralEtapa,
+                linhas, // array de [chaveComposta, {total, naEtapa, valores}]
+            };
+            document.getElementById('btnExportarAnaliseContainer').style.display = 'block';
+        }
+
+        async function exportarAnalise() {
+            if (!ultimaAnalise) {
+                alert('Execute a análise primeiro.');
+                return;
+            }
+
+            try {
+                const resp = await fetch('/exportar-analise', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(ultimaAnalise),
+                });
+
+                if (!resp.ok) {
+                    const data = await resp.json();
+                    alert(data.error || 'Erro ao exportar análise');
+                    return;
+                }
+
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `analise_${(ultimaAnalise.camposAgrupamento || []).join('_')}.xlsx`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert('Erro ao exportar análise: ' + e.message);
+            }
         }
 
         async function exportarExcel() {

@@ -279,8 +279,12 @@ def campos():
 
 
 def montar_conditions(data):
-    """Monta as condições de pesquisa a partir dos parâmetros."""
+    """Monta as condições de pesquisa a partir dos parâmetros.
+    Retorna (conditions, filtros_locais) onde filtros_locais são filtros
+    que precisam ser aplicados após a busca (ex: not_contains).
+    """
     conditions = []
+    filtros_locais = []  # filtros aplicados após busca (not_contains)
     campo_filtro = data.get("campo_filtro", "dateCreated")
     data_inicio = data.get("data_inicio", "").strip()
     data_fim = data.get("data_fim", "").strip()
@@ -304,18 +308,83 @@ def montar_conditions(data):
             "values": [dt_fim_ajustado.strftime("%Y-%m-%dT%H:%M:%S") + "-03:00"],
         })
 
-    # Filtro adicional por campo personalizado
+    # Filtros adicionais por campos personalizados (múltiplos)
+    filtros_extras = data.get("filtros_extras", [])
+    for filtro in filtros_extras:
+        campo_extra = (filtro.get("campo_extra") or "").strip()
+        valor_extra = (filtro.get("valor_extra") or "").strip()
+        tipo_busca = filtro.get("tipo_busca", "match")
+        if campo_extra and valor_extra:
+            if tipo_busca == "not_contains":
+                filtros_locais.append({
+                    "field": campo_extra,
+                    "value": valor_extra,
+                })
+            else:
+                conditions.append({
+                    "field": campo_extra,
+                    "expression": tipo_busca,
+                    "values": [valor_extra],
+                })
+
+    # Compatibilidade: campo_extra único (legado)
     campo_extra = data.get("campo_extra", "").strip()
     valor_extra = data.get("valor_extra", "").strip()
     tipo_busca = data.get("tipo_busca", "match")
     if campo_extra and valor_extra:
-        conditions.append({
-            "field": campo_extra,
-            "expression": tipo_busca,
-            "values": [valor_extra],
-        })
+        if tipo_busca == "not_contains":
+            filtros_locais.append({
+                "field": campo_extra,
+                "value": valor_extra,
+            })
+        else:
+            conditions.append({
+                "field": campo_extra,
+                "expression": tipo_busca,
+                "values": [valor_extra],
+            })
 
-    return conditions
+    return conditions, filtros_locais
+
+
+def aplicar_filtros_locais(deals, filtros_locais, cf_map):
+    """Aplica filtros locais (not_contains) nos deals já processados."""
+    if not filtros_locais:
+        return deals
+
+    # Inverter cf_map para poder buscar por nome do campo -> id
+    cf_name_to_id = {v: k for k, v in cf_map.items()}
+
+    resultado = []
+    for deal in deals:
+        incluir = True
+        for filtro in filtros_locais:
+            campo = filtro["field"]
+            valor = filtro["value"].lower()
+
+            # Verificar nos custom fields do deal (entityCustomFields)
+            cf_values = []
+            for ecf in deal.get("entityCustomFields") or []:
+                cf_id = ecf.get("id")
+                cf_nome = cf_map.get(cf_id, str(cf_id))
+                # Comparar por nome ou por key/id do campo
+                if cf_nome == campo or str(cf_id) == campo:
+                    text_val = (ecf.get("textValue") or "").lower()
+                    cf_values.append(text_val)
+
+            # Se algum valor do campo contém o texto buscado, excluir o deal
+            for cv in cf_values:
+                if valor in cv:
+                    incluir = False
+                    break
+
+            if not incluir:
+                break
+
+        if incluir:
+            resultado.append(deal)
+
+    return resultado
 
 
 @app.route("/buscar", methods=["POST"])
@@ -327,7 +396,7 @@ def buscar():
     if not api_key:
         return jsonify({"error": "API Key é obrigatória"}), 400
 
-    conditions = montar_conditions(data)
+    conditions, filtros_locais = montar_conditions(data)
     if not conditions:
         return jsonify({"error": "Informe pelo menos um filtro (datas ou campo personalizado)"}), 400
 
@@ -335,6 +404,10 @@ def buscar():
         deals = buscar_deals(api_key, conditions)
         cf_map = buscar_custom_fields(api_key)
         stage_map = buscar_stages(api_key)
+
+        # Aplicar filtros locais (not_contains) antes de processar
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
 
         resumo = []
         for d in deals:
@@ -395,16 +468,21 @@ def exportar():
     if not api_key:
         return jsonify({"error": "API Key é obrigatória"}), 400
 
-    conditions = montar_conditions(data)
+    conditions, filtros_locais = montar_conditions(data)
     if not conditions:
         return jsonify({"error": "Informe pelo menos um filtro"}), 400
 
     try:
         deals = buscar_deals(api_key, conditions)
+        cf_map = buscar_custom_fields(api_key)
+
+        # Aplicar filtros locais (not_contains)
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
+
         if not deals:
             return jsonify({"error": "Nenhum deal encontrado para os filtros informados"}), 404
 
-        cf_map = buscar_custom_fields(api_key)
         excel_file = gerar_excel(deals, cf_map)
         nome_arquivo = f"leads_moskit_{data_inicio}_a_{data_fim}.xlsx"
 
@@ -418,6 +496,103 @@ def exportar():
         return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/exportar-analise", methods=["POST"])
+def exportar_analise():
+    """Gera Excel com os dados da análise por campos de agrupamento."""
+    data = request.json or {}
+    campos_agrupamento = data.get("camposAgrupamento", [])
+    # Compatibilidade com formato antigo (campo único)
+    if not campos_agrupamento:
+        campo_antigo = data.get("campoAnuncio", "")
+        if campo_antigo:
+            campos_agrupamento = [campo_antigo]
+    etapa = data.get("etapaSelecionada", "")
+    total_geral = data.get("totalGeral", 0)
+    total_na_etapa = data.get("totalNaEtapa", 0)
+    pct_geral = data.get("pctGeralEtapa", "0.0")
+    linhas = data.get("linhas", [])
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Análise de Qualificação"
+
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="8E44AD", end_color="8E44AD", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    bold_font = Font(bold=True, size=11)
+
+    # Resumo
+    ws.cell(row=1, column=1, value="Resumo da Análise").font = Font(bold=True, size=14)
+    ws.cell(row=2, column=1, value="Campos analisados:").font = bold_font
+    ws.cell(row=2, column=2, value=" ▸ ".join(campos_agrupamento))
+    ws.cell(row=3, column=1, value="Total de Leads:").font = bold_font
+    ws.cell(row=3, column=2, value=total_geral)
+    if etapa:
+        ws.cell(row=4, column=1, value=f'Passaram por "{etapa}":').font = bold_font
+        ws.cell(row=4, column=2, value=total_na_etapa)
+        ws.cell(row=5, column=1, value="Taxa de conversão geral:").font = bold_font
+        ws.cell(row=5, column=2, value=f"{pct_geral}%")
+
+    # Tabela
+    start_row = 7
+    headers = list(campos_agrupamento) + ["Total Leads"]
+    if etapa:
+        headers += [f'Passaram por "{etapa}"', "% Conversão"]
+
+    for col_idx, titulo in enumerate(headers, 1):
+        cell = ws.cell(row=start_row, column=col_idx, value=titulo)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    for i, item in enumerate(linhas):
+        # item é [chaveComposta, {total, naEtapa, valores}]
+        dados = item[1] if isinstance(item, list) else item
+        valores = dados.get("valores", []) if isinstance(dados, dict) else []
+        data_row = start_row + 1 + i
+
+        # Preencher cada coluna de campo
+        for col_idx, val in enumerate(valores, 1):
+            ws.cell(row=data_row, column=col_idx, value=val).border = thin_border
+
+        col_total = len(campos_agrupamento) + 1
+        total = dados.get("total", 0) if isinstance(dados, dict) else 0
+        ws.cell(row=data_row, column=col_total, value=total).border = thin_border
+
+        if etapa:
+            na_etapa = dados.get("naEtapa", 0) if isinstance(dados, dict) else 0
+            pct = f"{((na_etapa / total) * 100):.1f}%" if total > 0 else "0.0%"
+            ws.cell(row=data_row, column=col_total + 1, value=na_etapa).border = thin_border
+            ws.cell(row=data_row, column=col_total + 2, value=pct).border = thin_border
+
+    # Ajustar largura
+    for col_idx in range(1, len(headers) + 1):
+        max_len = 0
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        for r in ws.iter_rows(min_col=col_idx, max_col=col_idx, min_row=1, max_row=ws.max_row):
+            for cell in r:
+                if cell.value:
+                    max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_len + 4, 60)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    nome_arquivo = "analise_" + "_".join(campos_agrupamento)[:100] + ".xlsx"
+    return send_file(
+        output,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=nome_arquivo,
+    )
 
 
 if __name__ == "__main__":
