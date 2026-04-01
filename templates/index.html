@@ -274,6 +274,9 @@
                 <button class="btn btn-primary" id="btnBuscar" onclick="buscarDeals()">
                     Buscar Leads
                 </button>
+                <button class="btn" id="btnCancelar" onclick="cancelarBusca()" style="display:none; background:#e74c3c; color:#fff;">
+                    Cancelar
+                </button>
                 <button class="btn btn-success" id="btnExportar" onclick="exportarExcel()" disabled>
                     Exportar Excel
                 </button>
@@ -456,14 +459,26 @@
             };
         }
 
+        let buscaAbortController = null;
+
+        function cancelarBusca() {
+            if (buscaAbortController) {
+                buscaAbortController.abort();
+                buscaAbortController = null;
+            }
+        }
+
         async function buscarDeals() {
             const params = getParams();
             if (!params.api_key) { setStatus('Informe a API Key.', 'error'); return; }
             if (!params.data_inicio || !params.data_fim) { setStatus('Informe as datas.', 'error'); return; }
 
+            buscaAbortController = new AbortController();
             const btn = document.getElementById('btnBuscar');
+            const btnCancelar = document.getElementById('btnCancelar');
             btn.disabled = true;
             btn.innerHTML = '<span class="loading"></span> Buscando...';
+            btnCancelar.style.display = 'inline-block';
             setStatus('Consultando API do Moskit...', 'info');
 
             try {
@@ -471,6 +486,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(params),
+                    signal: buscaAbortController.signal,
                 });
 
                 const data = await resp.json();
@@ -520,19 +536,34 @@
                 dadosDeals.forEach(d => {
                     if (d.customFields) Object.keys(d.customFields).forEach(k => cfPresentes.add(k));
                 });
+                // Garantir que os campos padrão de análise sempre apareçam
+                ['ad_name', 'campaign_name', 'ad_set'].forEach(k => cfPresentes.add(k));
+                // Incluir todos os campos disponíveis da API
+                camposDisponiveis.forEach(c => {
+                    const key = c.key || c.field || c.id;
+                    if (key) cfPresentes.add(key);
+                });
                 cfPresentesList = Array.from(cfPresentes).sort();
 
-                // Limpar campos de análise anteriores e adicionar o primeiro
+                // Limpar campos de análise anteriores e adicionar os 3 padrões
                 document.getElementById('camposAnaliseContainer').innerHTML = '';
                 campoAnaliseCount = 0;
-                adicionarCampoAnalise();
+                adicionarCampoAnalise('campaign_name');
+                adicionarCampoAnalise('ad_set');
+                adicionarCampoAnalise('ad_name');
 
                 document.getElementById('analiseCard').style.display = 'block';
             } catch (e) {
-                setStatus('Erro de conexão: ' + e.message, 'error');
+                if (e.name === 'AbortError') {
+                    setStatus('Busca cancelada.', 'error');
+                } else {
+                    setStatus('Erro de conexão: ' + e.message, 'error');
+                }
             } finally {
+                buscaAbortController = null;
                 btn.disabled = false;
                 btn.innerHTML = 'Buscar Leads';
+                btnCancelar.style.display = 'none';
             }
         }
 
@@ -598,7 +629,7 @@
         let cfPresentes = new Set();
         let cfPresentesList = [];
 
-        function adicionarCampoAnalise() {
+        function adicionarCampoAnalise(valorPadrao) {
             campoAnaliseCount++;
             const id = campoAnaliseCount;
             const container = document.getElementById('camposAnaliseContainer');
@@ -609,7 +640,8 @@
 
             let opcoesHTML = '<option value="">-- Selecione --</option>';
             cfPresentesList.forEach(cf => {
-                opcoesHTML += `<option value="${cf}">${cf}</option>`;
+                const selected = (valorPadrao && cf === valorPadrao) ? ' selected' : '';
+                opcoesHTML += `<option value="${cf}"${selected}>${cf}</option>`;
             });
 
             const nivelLabel = container.children.length === 0 ? 'Campo principal' :
