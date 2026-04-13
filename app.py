@@ -457,6 +457,37 @@ def buscar():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/deal_activities/<int:deal_id>", methods=["POST"])
+def deal_activities(deal_id):
+    """Retorna as atividades de um deal específico."""
+    data = request.json or {}
+    api_key = data.get("api_key", "").strip()
+    if not api_key:
+        return jsonify({"error": "API Key não informada"}), 400
+
+    try:
+        resp = requests.get(
+            f"{API_BASE}/deals/{deal_id}/activities",
+            headers=moskit_headers(api_key),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        atividades = resp.json()
+        return jsonify([
+            {
+                "type_id": (a.get("type") or {}).get("id"),
+                "title": a.get("title", ""),
+                "doneDate": a.get("doneDate"),
+                "dateCreated": a.get("dateCreated"),
+            }
+            for a in atividades
+        ])
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/exportar", methods=["POST"])
 def exportar():
     """Busca deals e exporta para Excel."""
@@ -500,18 +531,20 @@ def exportar():
 
 @app.route("/exportar-analise", methods=["POST"])
 def exportar_analise():
-    """Gera Excel com os dados da análise por campos de agrupamento."""
+    """Gera Excel com os dados da análise por campos de agrupamento (suporta múltiplas etapas de funil)."""
     data = request.json or {}
     campos_agrupamento = data.get("camposAgrupamento", [])
-    # Compatibilidade com formato antigo (campo único)
     if not campos_agrupamento:
         campo_antigo = data.get("campoAnuncio", "")
         if campo_antigo:
             campos_agrupamento = [campo_antigo]
-    etapa = data.get("etapaSelecionada", "")
+    # Suporte a múltiplas etapas (novo formato) e etapa única (legado)
+    etapas_marcadas = data.get("etapasMarcadas", [])
+    if not etapas_marcadas:
+        etapa_legado = data.get("etapaSelecionada", "")
+        if etapa_legado:
+            etapas_marcadas = [etapa_legado]
     total_geral = data.get("totalGeral", 0)
-    total_na_etapa = data.get("totalNaEtapa", 0)
-    pct_geral = data.get("pctGeralEtapa", "0.0")
     linhas = data.get("linhas", [])
 
     wb = Workbook()
@@ -533,17 +566,15 @@ def exportar_analise():
     ws.cell(row=2, column=2, value=" ▸ ".join(campos_agrupamento))
     ws.cell(row=3, column=1, value="Total de Leads:").font = bold_font
     ws.cell(row=3, column=2, value=total_geral)
-    if etapa:
-        ws.cell(row=4, column=1, value=f'Passaram por "{etapa}":').font = bold_font
-        ws.cell(row=4, column=2, value=total_na_etapa)
-        ws.cell(row=5, column=1, value="Taxa de conversão geral:").font = bold_font
-        ws.cell(row=5, column=2, value=f"{pct_geral}%")
+    ws.cell(row=4, column=1, value="Etapas do funil:").font = bold_font
+    ws.cell(row=4, column=2, value=" → ".join(etapas_marcadas) if etapas_marcadas else "—")
 
     # Tabela
-    start_row = 7
+    start_row = 6
     headers = list(campos_agrupamento) + ["Total Leads"]
-    if etapa:
-        headers += [f'Passaram por "{etapa}"', "% Conversão"]
+    for etapa in etapas_marcadas:
+        headers += [etapa, f"% → {etapa}"]
+    headers += ["Ganhos", "% Ganho", "Perdidos", "% Perdido"]
 
     for col_idx, titulo in enumerate(headers, 1):
         cell = ws.cell(row=start_row, column=col_idx, value=titulo)
@@ -553,12 +584,10 @@ def exportar_analise():
         cell.border = thin_border
 
     for i, item in enumerate(linhas):
-        # item é [chaveComposta, {total, naEtapa, valores}]
         dados = item[1] if isinstance(item, list) else item
         valores = dados.get("valores", []) if isinstance(dados, dict) else []
         data_row = start_row + 1 + i
 
-        # Preencher cada coluna de campo
         for col_idx, val in enumerate(valores, 1):
             ws.cell(row=data_row, column=col_idx, value=val).border = thin_border
 
@@ -566,11 +595,23 @@ def exportar_analise():
         total = dados.get("total", 0) if isinstance(dados, dict) else 0
         ws.cell(row=data_row, column=col_total, value=total).border = thin_border
 
-        if etapa:
-            na_etapa = dados.get("naEtapa", 0) if isinstance(dados, dict) else 0
-            pct = f"{((na_etapa / total) * 100):.1f}%" if total > 0 else "0.0%"
-            ws.cell(row=data_row, column=col_total + 1, value=na_etapa).border = thin_border
-            ws.cell(row=data_row, column=col_total + 2, value=pct).border = thin_border
+        por_etapa = dados.get("porEtapa", {}) if isinstance(dados, dict) else {}
+        for j, etapa in enumerate(etapas_marcadas):
+            n = por_etapa.get(etapa, dados.get("naEtapa", 0) if j == 0 else 0)
+            pct = f"{((n / total) * 100):.1f}%" if total > 0 else "0.0%"
+            col_e = col_total + 1 + j * 2
+            ws.cell(row=data_row, column=col_e, value=n).border = thin_border
+            ws.cell(row=data_row, column=col_e + 1, value=pct).border = thin_border
+
+        col_desfecho = col_total + 1 + len(etapas_marcadas) * 2
+        ganho   = dados.get("ganho", 0) if isinstance(dados, dict) else 0
+        perdido = dados.get("perdido", 0) if isinstance(dados, dict) else 0
+        pct_g = f"{((ganho   / total) * 100):.1f}%" if total > 0 else "0.0%"
+        pct_p = f"{((perdido / total) * 100):.1f}%" if total > 0 else "0.0%"
+        ws.cell(row=data_row, column=col_desfecho,     value=ganho).border   = thin_border
+        ws.cell(row=data_row, column=col_desfecho + 1, value=pct_g).border   = thin_border
+        ws.cell(row=data_row, column=col_desfecho + 2, value=perdido).border = thin_border
+        ws.cell(row=data_row, column=col_desfecho + 3, value=pct_p).border   = thin_border
 
     # Ajustar largura
     for col_idx in range(1, len(headers) + 1):

@@ -292,10 +292,11 @@
             </div>
             <div class="form-row" style="margin-top:12px;">
                 <div class="form-group">
-                    <label>Etapa de referência</label>
-                    <select id="etapaAnalise">
-                        <option value="">-- Selecione após buscar --</option>
-                    </select>
+                    <label>Etapas do funil de conversão</label>
+                    <div id="etapasFunilContainer" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;">
+                        <!-- Checkboxes das etapas serão gerados aqui após a busca -->
+                        <span style="color:#999; font-size:13px;">Selecione após buscar</span>
+                    </div>
                 </div>
             </div>
             <div id="camposAnaliseContainer"></div>
@@ -306,6 +307,16 @@
             <div id="btnExportarAnaliseContainer" style="display:none; margin-top:12px;">
                 <button class="btn btn-success" onclick="exportarAnalise()">Exportar Análise (Excel)</button>
             </div>
+        </div>
+
+        <!-- Card de Tempo até Primeira Ligação -->
+        <div class="card" id="tempoLigacaoCard" style="display:none;">
+            <h2 style="margin:0 0 12px; border-bottom:2px solid #e8f4f8; padding-bottom:8px;">Tempo até Primeira Ligação</h2>
+            <p style="color:#666; font-size:13px; margin:0 0 12px;">Calcula, para cada lead da busca atual, quanto tempo demorou desde a criação do deal até a primeira ligação registrada.</p>
+            <div style="margin-bottom:12px;">
+                <button class="btn btn-primary" id="btnCalcularTempo" onclick="calcularTempoLigacao()">Calcular</button>
+            </div>
+            <div id="tempoLigacaoResultado" style="margin-top:8px;"></div>
         </div>
 
         <div class="card" id="resultadosCard" style="display:none;">
@@ -506,7 +517,7 @@
                 dadosStageNames = data.stageNames || [];
                 dadosCfNames = data.customFieldNames || [];
 
-                // Popular dropdown de etapas (apenas as fases relevantes)
+                // Popular checkboxes de etapas do funil (apenas stages reais)
                 const fasesAnalise = [
                     {id: 482559, nome: 'Inbound'},
                     {id: 462709, nome: 'Novo Lead'},
@@ -521,14 +532,22 @@
                     {id: 457658, nome: 'Conferência Agendada (Negociação)'},
                     {id: 457660, nome: 'Conferência Realizada (Fechamento)'},
                 ];
-                const selEtapa = document.getElementById('etapaAnalise');
-                selEtapa.innerHTML = '<option value="">-- Todas as etapas --</option>';
+                const etapasContainer = document.getElementById('etapasFunilContainer');
+                etapasContainer.innerHTML = '';
+                // Por padrão, marcar Pré-Qualificação e Qualificação
+                const defaultEtapas = new Set([457521, 457522]);
                 fasesAnalise.forEach(f => {
-                    const opt = document.createElement('option');
-                    opt.value = f.nome;
-                    opt.textContent = f.nome;
-                    if (f.id === 457522) opt.selected = true;
-                    selEtapa.appendChild(opt);
+                    const label = document.createElement('label');
+                    label.style.cssText = 'display:flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid #ddd;border-radius:6px;cursor:pointer;font-size:13px;background:#f9f9f9;user-select:none;';
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.value = f.nome;
+                    cb.dataset.id = f.id;
+                    cb.checked = defaultEtapas.has(f.id);
+                    cb.style.cursor = 'pointer';
+                    label.appendChild(cb);
+                    label.appendChild(document.createTextNode(f.nome));
+                    etapasContainer.appendChild(label);
                 });
 
                 // Coletar nomes de CF presentes nos deals para análise
@@ -553,6 +572,10 @@
                 adicionarCampoAnalise('ad_name');
 
                 document.getElementById('analiseCard').style.display = 'block';
+                document.getElementById('tempoLigacaoCard').style.display = 'block';
+                document.getElementById('tempoLigacaoResultado').innerHTML = '';
+                document.getElementById('btnCalcularTempo').disabled = false;
+                document.getElementById('btnCalcularTempo').textContent = 'Calcular';
             } catch (e) {
                 if (e.name === 'AbortError') {
                     setStatus('Busca cancelada.', 'error');
@@ -682,7 +705,27 @@
         }
 
         function analisarLeads() {
-            const etapaSelecionada = document.getElementById('etapaAnalise').value;
+            // Ordem do funil por ID (confiável, independe do nome)
+            const ordemFunilIds = [
+                462709, // Novo Lead
+                457523, // Sem Contato
+                475012, // Em Contato
+                457521, // Pré-Qualificação (Abertura)
+                457522, // Qualificação
+                457659, // Webinário
+                475013, // StandBy
+                457658, // Conferência Agendada (Negociação)
+                457660, // Conferência Realizada (Fechamento)
+            ];
+
+            // Coletar etapas marcadas: {id, nome}
+            const etapasMarcadas = [];
+            document.querySelectorAll('#etapasFunilContainer input[type=checkbox]:checked').forEach(cb => {
+                etapasMarcadas.push({ id: parseInt(cb.dataset.id), nome: cb.value });
+            });
+            // Ordenar pela posição no funil
+            etapasMarcadas.sort((a, b) => ordemFunilIds.indexOf(a.id) - ordemFunilIds.indexOf(b.id));
+
             const camposAgrupamento = getCamposAnalise();
 
             if (camposAgrupamento.length === 0) {
@@ -697,18 +740,11 @@
                 return;
             }
 
-            // Ordem do funil
-            const ordemFunil = [
-                'Inbound', 'Novo Lead', 'Agendado-IA', 'Desqualificado - IA',
-                'Pré-Qualificação (Abertura)', 'Sem Contato', 'Em Contato',
-                'Qualificação', 'Webinário', 'StandBy',
-                'Conferência Agendada (Negociação)', 'Conferência Realizada (Fechamento)',
-            ];
-
-            function passouPelaEtapa(stageName, etapa) {
-                const idxEtapa = ordemFunil.indexOf(etapa);
-                const idxLead = ordemFunil.indexOf(stageName);
-                if (idxEtapa === -1) return stageName === etapa;
+            function passouPelaEtapa(deal, etapa) {
+                const stageId = parseInt(deal.stage_id);
+                const idxEtapa = ordemFunilIds.indexOf(etapa.id);
+                const idxLead = ordemFunilIds.indexOf(stageId);
+                if (idxEtapa === -1) return stageId === etapa.id;
                 if (idxLead === -1) return false;
                 return idxLead >= idxEtapa;
             }
@@ -722,12 +758,16 @@
                 const chaveComposta = chaves.join(' ▸ ');
 
                 if (!agrupado[chaveComposta]) {
-                    agrupado[chaveComposta] = { total: 0, naEtapa: 0, valores: chaves };
+                    const porEtapa = {};
+                    etapasMarcadas.forEach(e => { porEtapa[e.id] = 0; });
+                    agrupado[chaveComposta] = { total: 0, porEtapa, ganho: 0, perdido: 0, valores: chaves };
                 }
                 agrupado[chaveComposta].total++;
-                if (etapaSelecionada && passouPelaEtapa(d.stage_name, etapaSelecionada)) {
-                    agrupado[chaveComposta].naEtapa++;
-                }
+                etapasMarcadas.forEach(e => {
+                    if (passouPelaEtapa(d, e)) agrupado[chaveComposta].porEtapa[e.id]++;
+                });
+                if (d.status === 'WON')  agrupado[chaveComposta].ganho++;
+                if (d.status === 'LOST') agrupado[chaveComposta].perdido++;
             }
 
             // Ordenar por total desc
@@ -735,67 +775,149 @@
                 .sort((a, b) => b[1].total - a[1].total);
 
             const totalGeral = dadosDeals.length;
-            const totalNaEtapa = etapaSelecionada
-                ? dadosDeals.filter(d => passouPelaEtapa(d.stage_name, etapaSelecionada)).length
-                : totalGeral;
-            const pctGeralEtapa = totalGeral > 0 ? ((totalNaEtapa / totalGeral) * 100).toFixed(1) : '0.0';
+            const totalGanho   = dadosDeals.filter(d => d.status === 'WON').length;
+            const totalPerdido = dadosDeals.filter(d => d.status === 'LOST').length;
 
-            // Resumo
+            // Resumo: cards por etapa + desfecho
             let html = `<div class="resumo-box">
                 <div class="resumo-item">
                     <div class="valor">${totalGeral}</div>
                     <div class="label">Total de Leads</div>
                 </div>`;
 
-            if (etapaSelecionada) {
+            etapasMarcadas.forEach(e => {
+                const count = dadosDeals.filter(d => passouPelaEtapa(d, e)).length;
+                const pct = totalGeral > 0 ? ((count / totalGeral) * 100).toFixed(1) : '0.0';
                 html += `<div class="resumo-item">
-                    <div class="valor">${totalNaEtapa}</div>
-                    <div class="label">Passaram por "${etapaSelecionada}"</div>
+                    <div class="valor">${count}</div>
+                    <div class="label">${e.nome}</div>
                 </div>
                 <div class="resumo-item">
-                    <div class="valor">${pctGeralEtapa}%</div>
-                    <div class="label">Taxa de conversão</div>
+                    <div class="valor">${pct}%</div>
+                    <div class="label">Conversão → ${e.nome}</div>
                 </div>`;
-            }
+            });
+
+            // Cards de desfecho
+            const pctGanho   = totalGeral > 0 ? ((totalGanho   / totalGeral) * 100).toFixed(1) : '0.0';
+            const pctPerdido = totalGeral > 0 ? ((totalPerdido / totalGeral) * 100).toFixed(1) : '0.0';
+            html += `<div class="resumo-item" style="border-color:#27ae60;">
+                <div class="valor" style="color:#27ae60;">${totalGanho}</div>
+                <div class="label">Ganhos</div>
+            </div>
+            <div class="resumo-item" style="border-color:#27ae60;">
+                <div class="valor" style="color:#27ae60;">${pctGanho}%</div>
+                <div class="label">Taxa de Ganho</div>
+            </div>
+            <div class="resumo-item" style="border-color:#e74c3c;">
+                <div class="valor" style="color:#e74c3c;">${totalPerdido}</div>
+                <div class="label">Perdidos</div>
+            </div>
+            <div class="resumo-item" style="border-color:#e74c3c;">
+                <div class="valor" style="color:#e74c3c;">${pctPerdido}%</div>
+                <div class="label">Taxa de Perda</div>
+            </div>`;
 
             html += `<div class="resumo-item">
                 <div class="valor">${linhas.length}</div>
                 <div class="label">Combinações distintas</div>
             </div></div>`;
 
-            // Tabela
+            // Funil visual entre etapas + desfecho
+            if (etapasMarcadas.length >= 1) {
+                html += `<div style="margin:12px 0; padding:10px 14px; background:#f4f0fb; border-radius:8px; font-size:13px;">
+                    <strong>Funil de conversão:</strong>
+                    <div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:8px;">`;
+
+                // Etapas do funil
+                for (let i = 0; i < etapasMarcadas.length; i++) {
+                    const e = etapasMarcadas[i];
+                    const count = dadosDeals.filter(d => passouPelaEtapa(d, e)).length;
+                    html += `<div style="background:#8E44AD; color:#fff; padding:6px 12px; border-radius:6px; text-align:center; min-width:80px;">
+                        <div style="font-weight:bold; font-size:16px;">${count}</div>
+                        <div style="font-size:11px; opacity:0.9;">${e.nome}</div>
+                    </div>`;
+                    if (i < etapasMarcadas.length - 1) {
+                        const prev = dadosDeals.filter(d => passouPelaEtapa(d, etapasMarcadas[i])).length;
+                        const next = dadosDeals.filter(d => passouPelaEtapa(d, etapasMarcadas[i+1])).length;
+                        const pctEtapa = prev > 0 ? ((next / prev) * 100).toFixed(1) : '0.0';
+                        html += `<div style="display:flex;flex-direction:column;align-items:center;color:#555;font-size:12px;">
+                            <span style="font-weight:bold;color:#8E44AD;">${pctEtapa}%</span>
+                            <span style="font-size:18px;">→</span>
+                        </div>`;
+                    }
+                }
+
+                // Seta de desfecho após última etapa do funil
+                const ultimaCount = etapasMarcadas.length > 0
+                    ? dadosDeals.filter(d => passouPelaEtapa(d, etapasMarcadas[etapasMarcadas.length - 1])).length
+                    : totalGeral;
+                const pctGanhoFunil   = ultimaCount > 0 ? ((totalGanho   / ultimaCount) * 100).toFixed(1) : '0.0';
+                const pctPerdidoFunil = ultimaCount > 0 ? ((totalPerdido / ultimaCount) * 100).toFixed(1) : '0.0';
+
+                html += `<div style="display:flex;flex-direction:column;align-items:center;color:#555;font-size:12px;">
+                    <span style="font-size:18px;">→</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:4px;">
+                    <div style="background:#27ae60;color:#fff;padding:4px 10px;border-radius:6px;text-align:center;min-width:70px;">
+                        <div style="font-weight:bold;">${totalGanho} <span style="font-size:11px;opacity:0.85;">(${pctGanhoFunil}%)</span></div>
+                        <div style="font-size:11px;">Ganhos</div>
+                    </div>
+                    <div style="background:#e74c3c;color:#fff;padding:4px 10px;border-radius:6px;text-align:center;min-width:70px;">
+                        <div style="font-weight:bold;">${totalPerdido} <span style="font-size:11px;opacity:0.85;">(${pctPerdidoFunil}%)</span></div>
+                        <div style="font-size:11px;">Perdidos</div>
+                    </div>
+                </div>`;
+
+                html += `</div></div>`;
+            }
+
+            // Tabela detalhada
             html += `<table class="analise-table"><thead><tr>`;
             for (const campo of camposAgrupamento) {
                 html += `<th>${campo}</th>`;
             }
             html += `<th>Total Leads</th>`;
-            if (etapaSelecionada) {
-                html += `<th>Passaram por "${etapaSelecionada}"</th>
-                    <th>% Conversão</th>
-                    <th>Proporção</th>`;
-            }
+            etapasMarcadas.forEach(e => {
+                html += `<th>${e.nome}</th><th>% → ${e.nome}</th>`;
+            });
+            html += `<th style="color:#27ae60;">Ganhos</th><th style="color:#27ae60;">% Ganho</th>
+                     <th style="color:#e74c3c;">Perdidos</th><th style="color:#e74c3c;">% Perdido</th>`;
             html += `</tr></thead><tbody>`;
 
             for (const [chave, dados] of linhas) {
-                const pct = dados.total > 0 ? ((dados.naEtapa / dados.total) * 100).toFixed(1) : '0.0';
-                const barColor = parseFloat(pct) >= 50 ? '#27ae60' :
-                                 parseFloat(pct) >= 25 ? '#f39c12' : '#e74c3c';
-
                 html += `<tr>`;
                 for (const val of dados.valores) {
                     html += `<td style="max-width:300px;word-break:break-all;">${val}</td>`;
                 }
                 html += `<td><strong>${dados.total}</strong></td>`;
 
-                if (etapaSelecionada) {
-                    html += `<td>${dados.naEtapa}</td>
-                        <td><strong>${pct}%</strong></td>
-                        <td><div class="bar-container">
-                            <div class="bar-fill" style="width:${Math.max(parseFloat(pct), 2)}%;background:${barColor};">
-                                ${parseFloat(pct) >= 15 ? pct + '%' : ''}
+                etapasMarcadas.forEach(e => {
+                    const n = dados.porEtapa[e.id] || 0;
+                    const pct = dados.total > 0 ? ((n / dados.total) * 100).toFixed(1) : '0.0';
+                    const barColor = parseFloat(pct) >= 50 ? '#27ae60' :
+                                     parseFloat(pct) >= 25 ? '#f39c12' : '#e74c3c';
+                    html += `<td>${n}</td>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:6px;">
+                                <strong>${pct}%</strong>
+                                <div class="bar-container" style="flex:1;">
+                                    <div class="bar-fill" style="width:${Math.max(parseFloat(pct), 2)}%;background:${barColor};">
+                                        ${parseFloat(pct) >= 15 ? pct + '%' : ''}
+                                    </div>
+                                </div>
                             </div>
-                        </div></td>`;
-                }
+                        </td>`;
+                });
+
+                // Colunas de desfecho
+                const pctG = dados.total > 0 ? ((dados.ganho   / dados.total) * 100).toFixed(1) : '0.0';
+                const pctP = dados.total > 0 ? ((dados.perdido / dados.total) * 100).toFixed(1) : '0.0';
+                html += `<td style="color:#27ae60;font-weight:bold;">${dados.ganho}</td>
+                         <td style="color:#27ae60;"><strong>${pctG}%</strong></td>
+                         <td style="color:#e74c3c;font-weight:bold;">${dados.perdido}</td>
+                         <td style="color:#e74c3c;"><strong>${pctP}%</strong></td>`;
+
                 html += `</tr>`;
             }
 
@@ -805,13 +927,161 @@
             // Salvar dados para exportação
             ultimaAnalise = {
                 camposAgrupamento,
-                etapaSelecionada,
+                etapasMarcadas: etapasMarcadas.map(e => e.nome),
+                etapaSelecionada: etapasMarcadas.length > 0 ? etapasMarcadas[etapasMarcadas.length - 1].nome : '',
                 totalGeral,
-                totalNaEtapa,
-                pctGeralEtapa,
-                linhas, // array de [chaveComposta, {total, naEtapa, valores}]
+                linhas: linhas.map(([chave, dados]) => [chave, {
+                    total: dados.total,
+                    valores: dados.valores,
+                    ganho: dados.ganho,
+                    perdido: dados.perdido,
+                    porEtapa: Object.fromEntries(
+                        etapasMarcadas.map(e => [e.nome, dados.porEtapa[e.id] || 0])
+                    ),
+                    naEtapa: etapasMarcadas.length > 0 ? (dados.porEtapa[etapasMarcadas[etapasMarcadas.length - 1].id] || 0) : 0,
+                }]),
             };
             document.getElementById('btnExportarAnaliseContainer').style.display = 'block';
+        }
+
+        async function calcularTempoLigacao() {
+            if (!dadosDeals.length) {
+                document.getElementById('tempoLigacaoResultado').innerHTML =
+                    '<div class="status error" style="display:block;">Busque leads primeiro.</div>';
+                return;
+            }
+
+            const btn = document.getElementById('btnCalcularTempo');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading" style="border-color:#fff;border-top-color:transparent;"></span> Calculando...';
+
+            const resultado = document.getElementById('tempoLigacaoResultado');
+            resultado.innerHTML = `<div class="status info" style="display:block;">Buscando atividades de ${dadosDeals.length} leads...</div>`;
+
+            const TIPO_LIGACAO = 218556;
+            const params = getParams();
+            let somaHoras = 0;
+            let detalhes = []; // {nome, id, criacao, primeiraLigacao, diffHoras}
+            let semLigacao = []; // {nome, id}
+
+            function formatarTempo(horas) {
+                if (horas < 1) return `${Math.round(horas * 60)} min`;
+                if (horas < 24) return `${horas.toFixed(1)} h`;
+                return `${(horas / 24).toFixed(1)} dias`;
+            }
+
+            for (let i = 0; i < dadosDeals.length; i++) {
+                const deal = dadosDeals[i];
+                resultado.innerHTML = `<div class="status info" style="display:block;">Processando ${i + 1}/${dadosDeals.length} leads...</div>`;
+
+                try {
+                    const resp = await fetch(`/deal_activities/${deal.id}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ api_key: params.api_key }),
+                    });
+                    if (!resp.ok) { semLigacao.push(deal); continue; }
+                    const atividades = await resp.json();
+
+                    const ligacoes = atividades
+                        .filter(a => a.type_id === TIPO_LIGACAO && a.doneDate)
+                        .sort((a, b) => new Date(a.doneDate) - new Date(b.doneDate));
+
+                    if (ligacoes.length > 0 && deal.createdDate) {
+                        const criacao = new Date(deal.createdDate);
+                        const primeiraLigacao = new Date(ligacoes[0].doneDate);
+                        const diffHoras = (primeiraLigacao - criacao) / (1000 * 60 * 60);
+                        if (diffHoras >= 0) {
+                            somaHoras += diffHoras;
+                            detalhes.push({ deal, diffHoras, primeiraLigacao });
+                        } else {
+                            semLigacao.push(deal);
+                        }
+                    } else {
+                        semLigacao.push(deal);
+                    }
+                } catch (e) {
+                    semLigacao.push(deal);
+                }
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Recalcular';
+
+            if (detalhes.length === 0) {
+                resultado.innerHTML = '<div class="status error" style="display:block;">Nenhuma ligação encontrada nos leads da busca.</div>';
+                return;
+            }
+
+            const mediaHoras = somaHoras / detalhes.length;
+            const medianaHoras = (() => {
+                const sorted = [...detalhes].sort((a, b) => a.diffHoras - b.diffHoras);
+                const mid = Math.floor(sorted.length / 2);
+                return sorted.length % 2 !== 0 ? sorted[mid].diffHoras : (sorted[mid - 1].diffHoras + sorted[mid].diffHoras) / 2;
+            })();
+
+            // Ordenar por tempo crescente
+            detalhes.sort((a, b) => a.diffHoras - b.diffHoras);
+
+            const formatarData = d => new Date(d).toLocaleString('pt-BR');
+
+            let html = `
+                <div class="resumo-box">
+                    <div class="resumo-item">
+                        <div class="valor">${dadosDeals.length}</div>
+                        <div class="label">Total de Leads</div>
+                    </div>
+                    <div class="resumo-item">
+                        <div class="valor">${detalhes.length}</div>
+                        <div class="label">Com Ligação</div>
+                    </div>
+                    <div class="resumo-item">
+                        <div class="valor">${semLigacao.length}</div>
+                        <div class="label">Sem Ligação</div>
+                    </div>
+                    <div class="resumo-item">
+                        <div class="valor">${formatarTempo(mediaHoras)}</div>
+                        <div class="label">Tempo Médio</div>
+                    </div>
+                    <div class="resumo-item">
+                        <div class="valor">${formatarTempo(medianaHoras)}</div>
+                        <div class="label">Mediana</div>
+                    </div>
+                </div>`;
+
+            // Tabela detalhada — com ligação
+            html += `<h3 style="margin:16px 0 8px; font-size:14px; color:#555;">Com ligação (${detalhes.length})</h3>
+                <table class="analise-table"><thead><tr>
+                    <th>Lead</th><th>Criado em</th><th>1ª Ligação</th><th>Tempo até Ligação</th>
+                </tr></thead><tbody>`;
+            for (const { deal, diffHoras, primeiraLigacao } of detalhes) {
+                const barColor = diffHoras <= 1 ? '#27ae60' : diffHoras <= 24 ? '#f39c12' : '#e74c3c';
+                html += `<tr>
+                    <td>${deal.name || deal.id}</td>
+                    <td>${formatarData(deal.createdDate)}</td>
+                    <td>${formatarData(primeiraLigacao)}</td>
+                    <td><span style="font-weight:bold; color:${barColor};">${formatarTempo(diffHoras)}</span></td>
+                </tr>`;
+            }
+            html += `</tbody></table>`;
+
+            // Tabela sem ligação
+            if (semLigacao.length > 0) {
+                html += `<h3 style="margin:16px 0 8px; font-size:14px; color:#555;">Sem ligação (${semLigacao.length})</h3>
+                    <table class="analise-table"><thead><tr>
+                        <th>Lead</th><th>Criado em</th><th>Etapa atual</th>
+                    </tr></thead><tbody>`;
+                for (const deal of semLigacao) {
+                    html += `<tr>
+                        <td>${deal.name || deal.id}</td>
+                        <td>${formatarData(deal.createdDate)}</td>
+                        <td>${deal.stage_name || ''}</td>
+                    </tr>`;
+                }
+                html += `</tbody></table>`;
+            }
+
+            resultado.innerHTML = html;
         }
 
         async function exportarAnalise() {
