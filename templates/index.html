@@ -104,6 +104,29 @@
         .status.info { display: block; background: #e8f4f8; color: #2E86AB; }
         .status.error { display: block; background: #fde8e8; color: #c0392b; }
         .status.success { display: block; background: #e8f8e8; color: #27ae60; }
+        /* Modal de formato de export */
+        #modalFormato {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.45);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        #modalFormato.open { display: flex; }
+        .modal-box {
+            background: #fff;
+            border-radius: 10px;
+            padding: 28px 32px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+            min-width: 300px;
+            text-align: center;
+        }
+        .modal-box h3 { font-size: 16px; margin-bottom: 6px; color: #333; }
+        .modal-box p  { font-size: 13px; color: #777; margin-bottom: 20px; }
+        .modal-btn-row { display: flex; gap: 12px; justify-content: center; }
+        .modal-btn-row .btn { min-width: 110px; }
         .results-header {
             display: flex;
             justify-content: space-between;
@@ -171,7 +194,13 @@
             text-align: left;
             font-weight: 600;
             border-bottom: 2px solid #7D3C98;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
         }
+        .analise-table th:hover { background: #7D3C98; }
+        .analise-table th.sort-asc::after  { content: ' ▲'; font-size: 11px; }
+        .analise-table th.sort-desc::after { content: ' ▼'; font-size: 11px; }
         .analise-table td {
             padding: 10px 12px;
             border-bottom: 1px solid #f0f0f0;
@@ -280,8 +309,37 @@
                 <button class="btn btn-success" id="btnExportar" onclick="exportarExcel()" disabled>
                     Exportar Excel
                 </button>
+                <button class="btn" id="btnExportarPreQual" onclick="exportarPreQualificados()" disabled style="background:#6c3483; color:#fff;">
+                    Exportar Pré-Qualificados (Excel)
+                </button>
+                <button class="btn" id="btnExportarQual" onclick="exportarQualificados()" disabled style="background:#8E44AD; color:#fff;">
+                    Exportar Qualificados (Excel)
+                </button>
+                <button class="btn" id="btnAbrirDesqual" onclick="abrirPainelDesqualificados()" disabled style="background:#c0392b; color:#fff;">
+                    Exportar Desqualificados (Excel)
+                </button>
             </div>
             <div class="status" id="status"></div>
+
+            <!-- Painel de filtro de desqualificados -->
+            <div id="painelDesqualificados" style="display:none; margin-top:16px; padding:16px; background:#fdf2f2; border:1px solid #f5c6c6; border-radius:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <strong style="color:#c0392b; font-size:14px;">Filtrar Desqualificados por Motivo de Perda</strong>
+                    <button type="button" onclick="fecharPainelDesqualificados()" style="background:none;border:none;font-size:18px;cursor:pointer;color:#999;">&times;</button>
+                </div>
+                <div id="motivosLoadingMsg" style="color:#888; font-size:13px;">Carregando motivos...</div>
+                <div id="motivosContainer" style="display:none;">
+                    <p style="font-size:13px; color:#555; margin-bottom:8px;">Selecione os motivos a incluir (nenhum selecionado = exportar todos os desqualificados):</p>
+                    <div id="motivosCheckboxes" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;"></div>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <button class="btn" onclick="selecionarTodosMotivos(true)" style="background:#555;color:#fff;padding:6px 12px;font-size:12px;">Marcar todos</button>
+                        <button class="btn" onclick="selecionarTodosMotivos(false)" style="background:#555;color:#fff;padding:6px 12px;font-size:12px;">Desmarcar todos</button>
+                        <button class="btn" id="btnConfirmarDesqual" onclick="exportarDesqualificados()" style="background:#c0392b;color:#fff;margin-left:auto;">
+                            Exportar
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Card de Análise -->
@@ -325,6 +383,21 @@
                 <span class="total-badge" id="totalBadge">0 leads</span>
             </div>
             <div id="tabelaContainer"></div>
+        </div>
+    </div>
+
+    <!-- Modal de escolha de formato -->
+    <div id="modalFormato">
+        <div class="modal-box">
+            <h3>Escolha o formato de exportação</h3>
+            <p id="modalFormatoDesc">Selecione como deseja baixar os leads.</p>
+            <div class="modal-btn-row">
+                <button class="btn btn-success" onclick="modalEscolher('excel')">Excel (.xlsx)</button>
+                <button class="btn btn-primary" onclick="modalEscolher('json')">JSON (.json)</button>
+            </div>
+            <div style="margin-top:14px;">
+                <button class="btn" onclick="fecharModalFormato()" style="background:#eee;color:#555;font-size:13px;padding:7px 18px;">Cancelar</button>
+            </div>
         </div>
     </div>
 
@@ -401,6 +474,37 @@
         let filtroExtraCount = 0;
         let camposDisponiveis = []; // armazena campos carregados da API
 
+        const STATUS_OPTIONS = [
+            { value: 'OPEN',   label: 'Aberto (OPEN)' },
+            { value: 'WON',    label: 'Ganho (WON)' },
+            { value: 'LOST',   label: 'Perdido (LOST)' },
+        ];
+
+        const CAMPOS_NATIVOS = [
+            { value: 'status', label: 'Status' },
+        ];
+
+        function onCampoExtraChange(selectEl) {
+            const id = selectEl.closest('.filtro-extra-row').id.replace('filtroExtra_', '');
+            const campo = selectEl.value;
+            const tipoBuscaGroup = document.getElementById(`tipoBuscaGroup_${id}`);
+            const valorGroup = document.getElementById(`valorGroup_${id}`);
+
+            if (campo === 'status') {
+                tipoBuscaGroup.style.display = 'none';
+                valorGroup.innerHTML = `
+                    <label>Status</label>
+                    <select class="valorExtra">
+                        ${STATUS_OPTIONS.map(o => `<option value="${o.value}">${o.label}</option>`).join('')}
+                    </select>`;
+            } else {
+                tipoBuscaGroup.style.display = '';
+                valorGroup.innerHTML = `
+                    <label>Valor</label>
+                    <input type="text" class="valorExtra" placeholder="Ex: nome da campanha">`;
+            }
+        }
+
         function adicionarFiltroExtra() {
             filtroExtraCount++;
             const id = filtroExtraCount;
@@ -411,6 +515,9 @@
             div.style.alignItems = 'flex-end';
 
             let opcoesHTML = '<option value="">-- Nenhum --</option>';
+            CAMPOS_NATIVOS.forEach(c => {
+                opcoesHTML += `<option value="${c.value}">${c.label}</option>`;
+            });
             camposDisponiveis.forEach(c => {
                 const val = c.key || c.field || c.id;
                 let texto = c.name || c.label || c.key || c.id;
@@ -421,9 +528,9 @@
             div.innerHTML = `
                 <div class="form-group">
                     <label>Campo</label>
-                    <select class="campoExtra">${opcoesHTML}</select>
+                    <select class="campoExtra" onchange="onCampoExtraChange(this)">${opcoesHTML}</select>
                 </div>
-                <div class="form-group" style="min-width:140px; flex:0.5;">
+                <div class="form-group" style="min-width:140px; flex:0.5;" id="tipoBuscaGroup_${id}">
                     <label>Tipo de busca</label>
                     <select class="tipoBusca">
                         <option value="match">Igual a (exato)</option>
@@ -431,7 +538,7 @@
                         <option value="not_contains">Não contém</option>
                     </select>
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="valorGroup_${id}">
                     <label>Valor</label>
                     <input type="text" class="valorExtra" placeholder="Ex: nome da campanha">
                 </div>
@@ -451,8 +558,10 @@
             const filtros = [];
             document.querySelectorAll('.filtro-extra-row').forEach(row => {
                 const campo = row.querySelector('.campoExtra').value;
-                const tipo = row.querySelector('.tipoBusca').value;
-                const valor = row.querySelector('.valorExtra').value.trim();
+                const tipoBuscaEl = row.querySelector('.tipoBusca');
+                const tipo = tipoBuscaEl ? tipoBuscaEl.value : 'match';
+                const valorEl = row.querySelector('.valorExtra');
+                const valor = valorEl ? valorEl.value.trim() : '';
                 if (campo && valor) {
                     filtros.push({ campo_extra: campo, tipo_busca: tipo, valor_extra: valor });
                 }
@@ -508,6 +617,11 @@
 
                 setStatus(`${data.total} lead(s) encontrado(s).`, 'success');
                 document.getElementById('btnExportar').disabled = false;
+                document.getElementById('btnExportarPreQual').disabled = false;
+                document.getElementById('btnExportarQual').disabled = false;
+                document.getElementById('btnAbrirDesqual').disabled = false;
+                // Fechar painel de desqualificados se estiver aberto de busca anterior
+                fecharPainelDesqualificados();
                 renderTabela(data.deals, data.customFieldNames || []);
                 document.getElementById('totalBadge').textContent = `${data.total} leads`;
                 document.getElementById('resultadosCard').style.display = 'block';
@@ -872,33 +986,41 @@
                 html += `</div></div>`;
             }
 
+            // Resetar estado de sort ao gerar nova tabela
+            _analiseSort = { col: -1, dir: 'desc' };
+
             // Tabela detalhada
-            html += `<table class="analise-table"><thead><tr>`;
+            html += `<table class="analise-table" id="analiseTable"><thead><tr>`;
+            let colIdx = 0;
             for (const campo of camposAgrupamento) {
-                html += `<th>${campo}</th>`;
+                html += `<th onclick="sortAnaliseTable(${colIdx}, 'text')">${campo}</th>`;
+                colIdx++;
             }
-            html += `<th>Total Leads</th>`;
+            html += `<th onclick="sortAnaliseTable(${colIdx++}, 'num')">Total Leads</th>`;
             etapasMarcadas.forEach(e => {
-                html += `<th>${e.nome}</th><th>% → ${e.nome}</th>`;
+                html += `<th onclick="sortAnaliseTable(${colIdx++}, 'num')">${e.nome}</th>`;
+                html += `<th onclick="sortAnaliseTable(${colIdx++}, 'pct')">% → ${e.nome}</th>`;
             });
-            html += `<th style="color:#27ae60;">Ganhos</th><th style="color:#27ae60;">% Ganho</th>
-                     <th style="color:#e74c3c;">Perdidos</th><th style="color:#e74c3c;">% Perdido</th>`;
+            html += `<th style="color:#27ae60;" onclick="sortAnaliseTable(${colIdx++}, 'num')">Ganhos</th>`;
+            html += `<th style="color:#27ae60;" onclick="sortAnaliseTable(${colIdx++}, 'pct')">% Ganho</th>`;
+            html += `<th style="color:#e74c3c;" onclick="sortAnaliseTable(${colIdx++}, 'num')">Perdidos</th>`;
+            html += `<th style="color:#e74c3c;" onclick="sortAnaliseTable(${colIdx++}, 'pct')">% Perdido</th>`;
             html += `</tr></thead><tbody>`;
 
             for (const [chave, dados] of linhas) {
                 html += `<tr>`;
                 for (const val of dados.valores) {
-                    html += `<td style="max-width:300px;word-break:break-all;">${val}</td>`;
+                    html += `<td style="max-width:300px;word-break:break-all;" data-val="${val}">${val}</td>`;
                 }
-                html += `<td><strong>${dados.total}</strong></td>`;
+                html += `<td data-val="${dados.total}"><strong>${dados.total}</strong></td>`;
 
                 etapasMarcadas.forEach(e => {
                     const n = dados.porEtapa[e.id] || 0;
                     const pct = dados.total > 0 ? ((n / dados.total) * 100).toFixed(1) : '0.0';
                     const barColor = parseFloat(pct) >= 50 ? '#27ae60' :
                                      parseFloat(pct) >= 25 ? '#f39c12' : '#e74c3c';
-                    html += `<td>${n}</td>
-                        <td>
+                    html += `<td data-val="${n}">${n}</td>
+                        <td data-val="${pct}">
                             <div style="display:flex;align-items:center;gap:6px;">
                                 <strong>${pct}%</strong>
                                 <div class="bar-container" style="flex:1;">
@@ -913,10 +1035,10 @@
                 // Colunas de desfecho
                 const pctG = dados.total > 0 ? ((dados.ganho   / dados.total) * 100).toFixed(1) : '0.0';
                 const pctP = dados.total > 0 ? ((dados.perdido / dados.total) * 100).toFixed(1) : '0.0';
-                html += `<td style="color:#27ae60;font-weight:bold;">${dados.ganho}</td>
-                         <td style="color:#27ae60;"><strong>${pctG}%</strong></td>
-                         <td style="color:#e74c3c;font-weight:bold;">${dados.perdido}</td>
-                         <td style="color:#e74c3c;"><strong>${pctP}%</strong></td>`;
+                html += `<td style="color:#27ae60;font-weight:bold;" data-val="${dados.ganho}">${dados.ganho}</td>`;
+                html += `<td style="color:#27ae60;" data-val="${pctG}"><strong>${pctG}%</strong></td>`;
+                html += `<td style="color:#e74c3c;font-weight:bold;" data-val="${dados.perdido}">${dados.perdido}</td>`;
+                html += `<td style="color:#e74c3c;" data-val="${pctP}"><strong>${pctP}%</strong></td>`;
 
                 html += `</tr>`;
             }
@@ -942,6 +1064,46 @@
                 }]),
             };
             document.getElementById('btnExportarAnaliseContainer').style.display = 'block';
+        }
+
+        // Estado de ordenação da tabela de análise
+        let _analiseSort = { col: -1, dir: 'desc' };
+
+        function sortAnaliseTable(colIdx, tipo) {
+            const table = document.getElementById('analiseTable');
+            if (!table) return;
+
+            const ths = table.querySelectorAll('thead th');
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+
+            // Alternar direção: se mesma coluna, inverte; senão começa desc
+            if (_analiseSort.col === colIdx) {
+                _analiseSort.dir = _analiseSort.dir === 'desc' ? 'asc' : 'desc';
+            } else {
+                _analiseSort.dir = 'desc';
+            }
+            _analiseSort.col = colIdx;
+
+            // Atualizar classes dos th
+            ths.forEach((th, i) => {
+                th.classList.remove('sort-asc', 'sort-desc');
+                if (i === colIdx) th.classList.add(_analiseSort.dir === 'desc' ? 'sort-desc' : 'sort-asc');
+            });
+
+            rows.sort((a, b) => {
+                const aVal = a.cells[colIdx]?.dataset?.val ?? '';
+                const bVal = b.cells[colIdx]?.dataset?.val ?? '';
+                let cmp;
+                if (tipo === 'text') {
+                    cmp = aVal.localeCompare(bVal, 'pt-BR', { sensitivity: 'base' });
+                } else {
+                    cmp = parseFloat(aVal) - parseFloat(bVal);
+                }
+                return _analiseSort.dir === 'desc' ? -cmp : cmp;
+            });
+
+            rows.forEach(r => tbody.appendChild(r));
         }
 
         async function calcularTempoLigacao() {
@@ -1115,41 +1277,232 @@
             }
         }
 
-        async function exportarExcel() {
+        async function abrirPainelDesqualificados() {
+            const painel = document.getElementById('painelDesqualificados');
+            painel.style.display = 'block';
+            document.getElementById('motivosLoadingMsg').style.display = 'block';
+            document.getElementById('motivosContainer').style.display = 'none';
+
             const params = getParams();
-            if (!params.api_key) { setStatus('Informe a API Key.', 'error'); return; }
-
-            const btn = document.getElementById('btnExportar');
-            btn.disabled = true;
-            btn.innerHTML = '<span class="loading" style="border-color:#fff;border-top-color:transparent;"></span> Exportando...';
-            setStatus('Gerando planilha Excel...', 'info');
-
             try {
-                const resp = await fetch('/exportar', {
+                const resp = await fetch('/motivos-perda', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(params),
                 });
-
+                const motivos = await resp.json();
                 if (!resp.ok) {
-                    const data = await resp.json();
-                    setStatus(data.error || 'Erro ao exportar', 'error');
+                    document.getElementById('motivosLoadingMsg').textContent = motivos.error || 'Erro ao carregar motivos.';
                     return;
                 }
 
-                const blob = await resp.blob();
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `leads_moskit_${params.data_inicio}_a_${params.data_fim}.xlsx`;
-                a.click();
-                URL.revokeObjectURL(url);
-                setStatus('Planilha exportada com sucesso!', 'success');
+                const container = document.getElementById('motivosCheckboxes');
+                container.innerHTML = '';
+                if (motivos.length === 0) {
+                    container.innerHTML = '<span style="color:#888;font-size:13px;">Nenhum lead desqualificado encontrado na busca atual.</span>';
+                } else {
+                    motivos.forEach(motivo => {
+                        const label = document.createElement('label');
+                        label.style.cssText = 'display:flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid #f5c6c6;border-radius:6px;cursor:pointer;font-size:13px;background:#fff;user-select:none;';
+                        const cb = document.createElement('input');
+                        cb.type = 'checkbox';
+                        cb.value = motivo;
+                        cb.className = 'motivo-cb';
+                        cb.checked = true;
+                        cb.style.cursor = 'pointer';
+                        label.appendChild(cb);
+                        label.appendChild(document.createTextNode(motivo));
+                        container.appendChild(label);
+                    });
+                }
+
+                document.getElementById('motivosLoadingMsg').style.display = 'none';
+                document.getElementById('motivosContainer').style.display = 'block';
             } catch (e) {
-                setStatus('Erro ao exportar: ' + e.message, 'error');
+                document.getElementById('motivosLoadingMsg').textContent = 'Erro: ' + e.message;
+            }
+        }
+
+        function fecharPainelDesqualificados() {
+            document.getElementById('painelDesqualificados').style.display = 'none';
+        }
+
+        function selecionarTodosMotivos(marcar) {
+            document.querySelectorAll('.motivo-cb').forEach(cb => { cb.checked = marcar; });
+        }
+
+        async function exportarDesqualificados() {
+            const params = getParams();
+            if (!params.api_key) { setStatus('Informe a API Key.', 'error'); return; }
+
+            const motivosSelecionados = Array.from(document.querySelectorAll('.motivo-cb:checked')).map(cb => cb.value);
+            const todosChecked = document.querySelectorAll('.motivo-cb').length === motivosSelecionados.length;
+            const motivos = todosChecked ? [] : motivosSelecionados;
+
+            if (!todosChecked && motivosSelecionados.length === 0) {
+                alert('Selecione pelo menos um motivo para exportar.');
+                return;
+            }
+
+            const nMotivos = motivosSelecionados.length;
+            const descMotivos = todosChecked ? 'todos os motivos' : `${nMotivos} motivo(s) selecionado(s)`;
+            const formato = await abrirModalFormato(`Exportar leads desqualificados (${descMotivos}).`);
+            if (!formato) return;
+
+            const btn = document.getElementById('btnConfirmarDesqual');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading" style="border-color:#fff;border-top-color:transparent;"></span> Exportando...';
+            setStatus('Filtrando desqualificados e gerando arquivo...', 'info');
+
+            try {
+                const sufixo = motivos.length > 0 ? `_${motivos.slice(0,2).join('_').replace(/\s+/g,'_').substring(0,40)}` : '';
+                const nomeBase = `leads_desqualificados${sufixo}`;
+
+                if (formato === 'json') {
+                    await _baixarArquivo('/exportar-json', { ...params, tipo: 'desqualificados', motivos }, nomeBase, 'json');
+                } else {
+                    await _baixarArquivo('/exportar-desqualificados', { ...params, motivos }, nomeBase, 'excel');
+                }
+                setStatus('Arquivo exportado com sucesso!', 'success');
+                fecharPainelDesqualificados();
+            } catch (e) {
+                setStatus(e.message, 'error');
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = 'Exportar Excel';
+                btn.innerHTML = 'Exportar';
+            }
+        }
+
+        // ── Modal de formato ─────────────────────────────────────────────
+        let _modalResolve = null;
+
+        function abrirModalFormato(descricao) {
+            document.getElementById('modalFormatoDesc').textContent = descricao;
+            document.getElementById('modalFormato').classList.add('open');
+            return new Promise(resolve => { _modalResolve = resolve; });
+        }
+
+        function modalEscolher(formato) {
+            document.getElementById('modalFormato').classList.remove('open');
+            if (_modalResolve) { _modalResolve(formato); _modalResolve = null; }
+        }
+
+        function fecharModalFormato() {
+            document.getElementById('modalFormato').classList.remove('open');
+            if (_modalResolve) { _modalResolve(null); _modalResolve = null; }
+        }
+
+        // Fechar ao clicar fora da caixa
+        document.getElementById('modalFormato').addEventListener('click', function(e) {
+            if (e.target === this) fecharModalFormato();
+        });
+
+        // ── Download genérico ─────────────────────────────────────────────
+        async function _baixarArquivo(rota, payload, nomeBase, formato) {
+            const ext = formato === 'json' ? 'json' : 'xlsx';
+            const params = getParams();
+            const resp = await fetch(rota, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const data = await resp.json();
+                throw new Error(data.error || 'Erro ao exportar');
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${nomeBase}_${params.data_inicio}_a_${params.data_fim}.${ext}`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // ── Export: todos os leads ────────────────────────────────────────
+        async function exportarExcel() {
+            const params = getParams();
+            if (!params.api_key) { setStatus('Informe a API Key.', 'error'); return; }
+
+            const formato = await abrirModalFormato('Exportar todos os leads encontrados na busca.');
+            if (!formato) return;
+
+            const btn = document.getElementById('btnExportar');
+            const labelOriginal = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading" style="border-color:#fff;border-top-color:transparent;"></span> Exportando...';
+            setStatus('Gerando arquivo...', 'info');
+
+            try {
+                if (formato === 'json') {
+                    await _baixarArquivo('/exportar-json', { ...params, tipo: 'todos' }, 'leads_moskit', 'json');
+                } else {
+                    await _baixarArquivo('/exportar', params, 'leads_moskit', 'excel');
+                }
+                setStatus('Arquivo exportado com sucesso!', 'success');
+            } catch (e) {
+                setStatus(e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = labelOriginal;
+            }
+        }
+
+        // ── Export: Pré-Qualificados ──────────────────────────────────────
+        async function exportarPreQualificados() {
+            const params = getParams();
+            if (!params.api_key) { setStatus('Informe a API Key.', 'error'); return; }
+
+            const formato = await abrirModalFormato('Exportar leads que passaram por Pré-Qualificação (e não avançaram para Qualificação).');
+            if (!formato) return;
+
+            const btn = document.getElementById('btnExportarPreQual');
+            const labelOriginal = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading" style="border-color:#fff;border-top-color:transparent;"></span> Exportando...';
+            setStatus('Filtrando Pré-Qualificados e gerando arquivo...', 'info');
+
+            try {
+                if (formato === 'json') {
+                    await _baixarArquivo('/exportar-json', { ...params, tipo: 'pre_qual' }, 'leads_pre_qualificados', 'json');
+                } else {
+                    await _baixarArquivo('/exportar-pre-qualificados', params, 'leads_pre_qualificados', 'excel');
+                }
+                setStatus('Arquivo exportado com sucesso!', 'success');
+            } catch (e) {
+                setStatus(e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = labelOriginal;
+            }
+        }
+
+        // ── Export: Qualificados ──────────────────────────────────────────
+        async function exportarQualificados() {
+            const params = getParams();
+            if (!params.api_key) { setStatus('Informe a API Key.', 'error'); return; }
+
+            const formato = await abrirModalFormato('Exportar leads que chegaram à etapa de Qualificação ou além.');
+            if (!formato) return;
+
+            const btn = document.getElementById('btnExportarQual');
+            const labelOriginal = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading" style="border-color:#fff;border-top-color:transparent;"></span> Exportando...';
+            setStatus('Filtrando Qualificados e gerando arquivo...', 'info');
+
+            try {
+                if (formato === 'json') {
+                    await _baixarArquivo('/exportar-json', { ...params, tipo: 'qual' }, 'leads_qualificados', 'json');
+                } else {
+                    await _baixarArquivo('/exportar-qualificados', params, 'leads_qualificados', 'excel');
+                }
+                setStatus('Arquivo exportado com sucesso!', 'success');
+            } catch (e) {
+                setStatus(e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = labelOriginal;
             }
         }
     </script>

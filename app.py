@@ -1,9 +1,10 @@
 import os
 import io
 import sys
+import json
 import datetime
 import requests
-from flask import Flask, render_template, request, send_file, jsonify
+from flask import Flask, render_template, request, send_file, jsonify, Response
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -142,11 +143,11 @@ def buscar_deals(api_key, conditions, quantity=200):
     return all_deals
 
 
-def gerar_excel(deals, cf_map):
+def gerar_excel(deals, cf_map, titulo="Leads Moskit"):
     """Gera um arquivo Excel com os deals incluindo custom fields."""
     wb = Workbook()
     ws = wb.active
-    ws.title = "Leads Moskit"
+    ws.title = titulo[:31]  # max 31 chars for sheet name
 
     header_font = Font(bold=True, color="FFFFFF", size=11)
     header_fill = PatternFill(start_color="2E86AB", end_color="2E86AB", fill_type="solid")
@@ -164,6 +165,7 @@ def gerar_excel(deals, cf_map):
         ("ID", "id"),
         ("Nome", "name"),
         ("Status", "status"),
+        ("Motivo de Perda", "_lost_reason"),
         ("Fase", "stage.id"),
         ("Responsável", "responsible.id"),
         ("Contato", "_contact_id"),
@@ -238,13 +240,44 @@ def gerar_excel(deals, cf_map):
     return output
 
 
+def gerar_json_leads(deals, cf_map):
+    """Gera JSON no formato [{meta_leadgen_id, nome, moskit_id}] para uma lista de deals."""
+    # Inverter cf_map: nome -> id
+    nome_para_id = {v: k for k, v in cf_map.items()}
+    cf_leadgen_id = nome_para_id.get("meta_leadgen_id")
+
+    resultado = []
+    for deal in deals:
+        # Buscar meta_leadgen_id nos custom fields do deal
+        meta_leadgen = ""
+        if cf_leadgen_id:
+            for ecf in deal.get("entityCustomFields") or []:
+                if ecf.get("id") == cf_leadgen_id:
+                    meta_leadgen = ecf.get("textValue", "") or ""
+                    break
+
+        resultado.append({
+            "meta_leadgen_id": meta_leadgen,
+            "nome": deal.get("name", ""),
+            "moskit_id": str(deal.get("id", "")),
+        })
+
+    return resultado
+
+
 def extrair_valor(deal, campo):
-    """Extrai valor de um deal, suportando campos aninhados."""
+    """Extrai valor de um deal, suportando campos aninhados e campos especiais."""
     if campo == "_contact_id":
         contacts = deal.get("contacts") or []
         if contacts:
             return contacts[0].get("id", "")
         return ""
+
+    if campo == "_lost_reason":
+        lost_reason = deal.get("lostReason")
+        if isinstance(lost_reason, dict):
+            return lost_reason.get("name", "")
+        return lost_reason or ""
 
     partes = campo.split(".")
     valor = deal
@@ -308,6 +341,9 @@ def montar_conditions(data):
             "values": [dt_fim_ajustado.strftime("%Y-%m-%dT%H:%M:%S") + "-03:00"],
         })
 
+    # Campos nativos que a API não suporta no search — filtrar localmente
+    CAMPOS_LOCAIS = {"status", "origin", "source"}
+
     # Filtros adicionais por campos personalizados (múltiplos)
     filtros_extras = data.get("filtros_extras", [])
     for filtro in filtros_extras:
@@ -315,10 +351,12 @@ def montar_conditions(data):
         valor_extra = (filtro.get("valor_extra") or "").strip()
         tipo_busca = filtro.get("tipo_busca", "match")
         if campo_extra and valor_extra:
-            if tipo_busca == "not_contains":
+            if tipo_busca == "not_contains" or campo_extra in CAMPOS_LOCAIS:
                 filtros_locais.append({
                     "field": campo_extra,
                     "value": valor_extra,
+                    "tipo": tipo_busca,
+                    "native": campo_extra in CAMPOS_LOCAIS,
                 })
             else:
                 conditions.append({
@@ -332,10 +370,12 @@ def montar_conditions(data):
     valor_extra = data.get("valor_extra", "").strip()
     tipo_busca = data.get("tipo_busca", "match")
     if campo_extra and valor_extra:
-        if tipo_busca == "not_contains":
+        if tipo_busca == "not_contains" or campo_extra in CAMPOS_LOCAIS:
             filtros_locais.append({
                 "field": campo_extra,
                 "value": valor_extra,
+                "tipo": tipo_busca,
+                "native": campo_extra in CAMPOS_LOCAIS,
             })
         else:
             conditions.append({
@@ -348,35 +388,40 @@ def montar_conditions(data):
 
 
 def aplicar_filtros_locais(deals, filtros_locais, cf_map):
-    """Aplica filtros locais (not_contains) nos deals já processados."""
+    """Aplica filtros locais nos deals: campos nativos (status, origin, source) e not_contains."""
     if not filtros_locais:
         return deals
-
-    # Inverter cf_map para poder buscar por nome do campo -> id
-    cf_name_to_id = {v: k for k, v in cf_map.items()}
 
     resultado = []
     for deal in deals:
         incluir = True
         for filtro in filtros_locais:
             campo = filtro["field"]
-            valor = filtro["value"].lower()
+            valor = filtro["value"]
+            tipo = filtro.get("tipo", "match")
+            is_native = filtro.get("native", False)
 
-            # Verificar nos custom fields do deal (entityCustomFields)
-            cf_values = []
-            for ecf in deal.get("entityCustomFields") or []:
-                cf_id = ecf.get("id")
-                cf_nome = cf_map.get(cf_id, str(cf_id))
-                # Comparar por nome ou por key/id do campo
-                if cf_nome == campo or str(cf_id) == campo:
-                    text_val = (ecf.get("textValue") or "").lower()
-                    cf_values.append(text_val)
-
-            # Se algum valor do campo contém o texto buscado, excluir o deal
-            for cv in cf_values:
-                if valor in cv:
-                    incluir = False
-                    break
+            if is_native:
+                # Campo nativo do deal (status, origin, source)
+                deal_val = str(deal.get(campo) or "")
+                if tipo == "not_contains":
+                    if valor.lower() in deal_val.lower():
+                        incluir = False
+                else:
+                    # match / contains / eq — comparação case-insensitive
+                    if deal_val.upper() != valor.upper():
+                        incluir = False
+            else:
+                # Custom field — filtro not_contains
+                valor_lower = valor.lower()
+                for ecf in deal.get("entityCustomFields") or []:
+                    cf_id = ecf.get("id")
+                    cf_nome = cf_map.get(cf_id, str(cf_id))
+                    if cf_nome == campo or str(cf_id) == campo:
+                        text_val = (ecf.get("textValue") or "").lower()
+                        if valor_lower in text_val:
+                            incluir = False
+                            break
 
             if not incluir:
                 break
@@ -397,10 +442,16 @@ def buscar():
         return jsonify({"error": "API Key é obrigatória"}), 400
 
     conditions, filtros_locais = montar_conditions(data)
-    if not conditions:
+    if not conditions and not filtros_locais:
         return jsonify({"error": "Informe pelo menos um filtro (datas ou campo personalizado)"}), 400
 
     try:
+        # Se só há filtros locais (ex: status=LOST sem datas), precisamos de uma condição mínima para a API
+        if not conditions and filtros_locais:
+            conditions = [
+                {"field": "dateCreated", "expression": "gt", "values": ["2000-01-01T00:00:00-03:00"]},
+            ]
+
         deals = buscar_deals(api_key, conditions)
         cf_map = buscar_custom_fields(api_key)
         stage_map = buscar_stages(api_key)
@@ -522,6 +573,293 @@ def exportar():
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True,
             download_name=nome_arquivo,
+        )
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/motivos-perda", methods=["POST"])
+def motivos_perda():
+    """Retorna lista de motivos de perda distintos dos deals LOST da busca atual."""
+    data = request.json
+    api_key = data.get("api_key", "").strip()
+    if not api_key:
+        return jsonify({"error": "API Key é obrigatória"}), 400
+
+    conditions, filtros_locais = montar_conditions(data)
+    if not conditions and not filtros_locais:
+        conditions = [
+            {"field": "dateCreated", "expression": "gt", "values": ["2000-01-01T00:00:00-03:00"]},
+        ]
+
+    try:
+        deals = buscar_deals(api_key, conditions)
+        cf_map = buscar_custom_fields(api_key)
+
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
+
+        motivos = set()
+        for d in deals:
+            if d.get("status") == "LOST":
+                lr = d.get("lostReason")
+                if isinstance(lr, dict):
+                    nome = lr.get("name", "").strip()
+                elif lr:
+                    nome = str(lr).strip()
+                else:
+                    nome = ""
+                motivos.add(nome if nome else "(sem motivo)")
+
+        return jsonify(sorted(motivos))
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/exportar-desqualificados", methods=["POST"])
+def exportar_desqualificados():
+    """Exporta para Excel os leads com status LOST, com filtro opcional por motivo de perda."""
+    data = request.json
+    api_key = data.get("api_key", "").strip()
+    data_inicio = data.get("data_inicio", "").strip()
+    data_fim = data.get("data_fim", "").strip()
+    motivos_filtro = data.get("motivos", [])  # lista de strings; vazia = todos
+
+    if not api_key:
+        return jsonify({"error": "API Key é obrigatória"}), 400
+
+    conditions, filtros_locais = montar_conditions(data)
+    if not conditions and not filtros_locais:
+        conditions = [
+            {"field": "dateCreated", "expression": "gt", "values": ["2000-01-01T00:00:00-03:00"]},
+        ]
+
+    try:
+        deals = buscar_deals(api_key, conditions)
+        cf_map = buscar_custom_fields(api_key)
+
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
+
+        # Filtrar apenas LOST
+        deals_lost = [d for d in deals if d.get("status") == "LOST"]
+
+        # Filtrar por motivo se especificado
+        if motivos_filtro:
+            motivos_set = set(motivos_filtro)
+            def get_motivo(d):
+                lr = d.get("lostReason")
+                if isinstance(lr, dict):
+                    return lr.get("name", "").strip() or "(sem motivo)"
+                return str(lr).strip() if lr else "(sem motivo)"
+
+            deals_lost = [d for d in deals_lost if get_motivo(d) in motivos_set]
+
+        if not deals_lost:
+            return jsonify({"error": "Nenhum lead desqualificado encontrado para os filtros informados"}), 404
+
+        excel_file = gerar_excel(deals_lost, cf_map, titulo="Desqualificados")
+        sufixo_motivo = "_" + "_".join(m[:20] for m in motivos_filtro[:3]) if motivos_filtro else ""
+        nome_arquivo = f"leads_desqualificados{sufixo_motivo}_{data_inicio}_a_{data_fim}.xlsx"
+
+        return send_file(
+            excel_file,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=nome_arquivo,
+        )
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+ORDEM_FUNIL = [
+    462709,  # Novo Lead
+    457523,  # Sem Contato
+    475012,  # Em Contato
+    457521,  # Pré-Qualificação (Abertura)
+    457522,  # Qualificação
+    457659,  # Webinário
+    475013,  # StandBy
+    457658,  # Conferência Agendada (Negociação)
+    457660,  # Conferência Realizada (Fechamento)
+]
+
+ETAPA_PRE_QUAL = 457521
+ETAPA_QUAL = 457522
+
+
+def passou_pela_etapa(deal, etapa_id):
+    """Retorna True se o deal está na etapa_id ou em etapa posterior do funil."""
+    stage_id = (deal.get("stage") or {}).get("id")
+    if not stage_id:
+        return False
+    try:
+        idx_etapa = ORDEM_FUNIL.index(etapa_id)
+        idx_lead = ORDEM_FUNIL.index(int(stage_id))
+        return idx_lead >= idx_etapa
+    except ValueError:
+        return False
+
+
+def passou_apenas_pre_qual(deal):
+    """Passou por Pré-Qualificação mas NÃO chegou à Qualificação."""
+    return passou_pela_etapa(deal, ETAPA_PRE_QUAL) and not passou_pela_etapa(deal, ETAPA_QUAL)
+
+
+@app.route("/exportar-pre-qualificados", methods=["POST"])
+def exportar_pre_qualificados():
+    """Exporta leads que passaram por Pré-Qualificação mas não chegaram à Qualificação."""
+    data = request.json
+    api_key = data.get("api_key", "").strip()
+    data_inicio = data.get("data_inicio", "").strip()
+    data_fim = data.get("data_fim", "").strip()
+
+    if not api_key:
+        return jsonify({"error": "API Key é obrigatória"}), 400
+
+    conditions, filtros_locais = montar_conditions(data)
+    if not conditions and not filtros_locais:
+        conditions = [{"field": "dateCreated", "expression": "gt", "values": ["2000-01-01T00:00:00-03:00"]}]
+
+    try:
+        deals = buscar_deals(api_key, conditions)
+        cf_map = buscar_custom_fields(api_key)
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
+
+        filtrados = [d for d in deals if passou_apenas_pre_qual(d)]
+        if not filtrados:
+            return jsonify({"error": "Nenhum lead em Pré-Qualificação encontrado"}), 404
+
+        excel_file = gerar_excel(filtrados, cf_map, titulo="Pré-Qualificação")
+        return send_file(
+            excel_file,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"leads_pre_qualificados_{data_inicio}_a_{data_fim}.xlsx",
+        )
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/exportar-qualificados", methods=["POST"])
+def exportar_qualificados():
+    """Exporta leads que passaram pela etapa de Qualificação (457522) ou além."""
+    data = request.json
+    api_key = data.get("api_key", "").strip()
+    data_inicio = data.get("data_inicio", "").strip()
+    data_fim = data.get("data_fim", "").strip()
+
+    if not api_key:
+        return jsonify({"error": "API Key é obrigatória"}), 400
+
+    conditions, filtros_locais = montar_conditions(data)
+    if not conditions and not filtros_locais:
+        conditions = [{"field": "dateCreated", "expression": "gt", "values": ["2000-01-01T00:00:00-03:00"]}]
+
+    try:
+        deals = buscar_deals(api_key, conditions)
+        cf_map = buscar_custom_fields(api_key)
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
+
+        filtrados = [d for d in deals if passou_pela_etapa(d, ETAPA_QUAL)]
+        if not filtrados:
+            return jsonify({"error": "Nenhum lead em Qualificação encontrado"}), 404
+
+        excel_file = gerar_excel(filtrados, cf_map, titulo="Qualificação")
+        return send_file(
+            excel_file,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"leads_qualificados_{data_inicio}_a_{data_fim}.xlsx",
+        )
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/debug-cf", methods=["POST"])
+def debug_cf():
+    """Retorna todos os custom fields disponíveis (id + nome) para diagnóstico."""
+    data = request.json
+    api_key = data.get("api_key", "").strip()
+    if not api_key:
+        return jsonify({"error": "API Key obrigatória"}), 400
+    try:
+        cf_map = buscar_custom_fields(api_key)
+        return jsonify(sorted(cf_map.items(), key=lambda x: x[1]))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/exportar-json", methods=["POST"])
+def exportar_json():
+    """Exporta deals em JSON no formato [{meta_leadgen_id, nome, moskit_id}].
+    Aceita o parâmetro 'tipo': 'todos' | 'pre_qual' | 'qual' | 'desqualificados'.
+    Para 'desqualificados' aceita também 'motivos' (lista de strings).
+    """
+    data = request.json
+    api_key = data.get("api_key", "").strip()
+    tipo = data.get("tipo", "todos")
+    motivos_filtro = data.get("motivos", [])
+    data_inicio = data.get("data_inicio", "").strip()
+    data_fim = data.get("data_fim", "").strip()
+
+    if not api_key:
+        return jsonify({"error": "API Key é obrigatória"}), 400
+
+    conditions, filtros_locais = montar_conditions(data)
+    if not conditions and not filtros_locais:
+        conditions = [{"field": "dateCreated", "expression": "gt", "values": ["2000-01-01T00:00:00-03:00"]}]
+
+    try:
+        deals = buscar_deals(api_key, conditions)
+        cf_map = buscar_custom_fields(api_key)
+
+        if filtros_locais:
+            deals = aplicar_filtros_locais(deals, filtros_locais, cf_map)
+
+        if tipo == "pre_qual":
+            deals = [d for d in deals if passou_apenas_pre_qual(d)]
+            nome_arquivo = f"leads_pre_qualificados_{data_inicio}_a_{data_fim}.json"
+        elif tipo == "qual":
+            deals = [d for d in deals if passou_pela_etapa(d, ETAPA_QUAL)]
+            nome_arquivo = f"leads_qualificados_{data_inicio}_a_{data_fim}.json"
+        elif tipo == "desqualificados":
+            deals = [d for d in deals if d.get("status") == "LOST"]
+            if motivos_filtro:
+                motivos_set = set(motivos_filtro)
+                def get_motivo(d):
+                    lr = d.get("lostReason")
+                    if isinstance(lr, dict):
+                        return lr.get("name", "").strip() or "(sem motivo)"
+                    return str(lr).strip() if lr else "(sem motivo)"
+                deals = [d for d in deals if get_motivo(d) in motivos_set]
+            sufixo = "_" + "_".join(m[:20] for m in motivos_filtro[:3]) if motivos_filtro else ""
+            nome_arquivo = f"leads_desqualificados{sufixo}_{data_inicio}_a_{data_fim}.json"
+        else:
+            nome_arquivo = f"leads_moskit_{data_inicio}_a_{data_fim}.json"
+
+        if not deals:
+            return jsonify({"error": "Nenhum lead encontrado para os filtros informados"}), 404
+
+        resultado = gerar_json_leads(deals, cf_map)
+        json_str = "return " + json.dumps(resultado, ensure_ascii=False, indent=2) + ";"
+
+        return Response(
+            json_str,
+            mimetype="application/json",
+            headers={"Content-Disposition": f"attachment; filename={nome_arquivo}"},
         )
     except requests.exceptions.HTTPError as e:
         return jsonify({"error": f"Erro na API: {e.response.status_code} - {e.response.text}"}), 400
